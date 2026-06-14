@@ -1,5 +1,7 @@
 /target/
 *.pdb
 *.db
+*.db-journal
 *.res
 resource.rc
+*.exe
