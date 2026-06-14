@@ -5,3 +5,6 @@
 *.res
 resource.rc
 *.exe
+# User configs (not tracked — copy from .example)
+settings.toml
+scraper.toml
