@@ -51,3 +51,12 @@ convert = "simplify"
 type = "path"
 start = 1
 end = 10
+
+# --- 图片模式：Photos18 ---
+[[rules]]
+name = "Photos18"
+domain = "photos18.com"
+container = "#content"
+selectors = [
+    { expression = "img", attribute = "src" },
+]
