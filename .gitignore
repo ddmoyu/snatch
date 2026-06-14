@@ -1,0 +1,5 @@
+/target/
+*.pdb
+*.db
+*.res
+resource.rc

@@ -1,0 +1,30 @@
+[package]
+name = "snatch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+wreq = { version = "6.0.0-rc.29", features = ["cookies", "gzip", "deflate", "brotli", "zstd"] }
+wreq-util = "3.0.0-rc"
+scraper = "0.22"
+zhconv = "0.4"
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+regex = "1"
+rusqlite = { version = "0.35", features = ["bundled"] }
+arboard = "3"
+dirs = "6"
+num_cpus = "1"
+url = "2"
+tray-icon = "0.19"
+muda = "0.15"
+tao = "0.30"
+
+[profile.release]
+opt-level = "s"       # size optimization
+lto = true            # link-time optimization
+codegen-units = 1     # better optimization
+strip = true          # remove debug symbols
+panic = "abort"       # smaller panic handler

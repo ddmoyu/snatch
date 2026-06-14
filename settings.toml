@@ -1,0 +1,39 @@
+# ============================================
+# Snatch 设置文件
+# ============================================
+
+[general]
+# 默认下载目录（支持 ~ 表示用户主目录）
+download_dir = "~/Desktop/Snatch"
+
+# 目录命名规则
+# "title"           - 使用网页 <title> 标签
+# "title_timestamp" - title + 时间戳后缀
+dir_naming = "title"
+
+# 目录重名策略
+# "number"    - 追加序号：title_2, title_3
+# "timestamp" - 追加时间戳
+# "merge"     - 合并到已有目录
+dir_collision = "number"
+
+[download]
+# 最大并发下载数，0 = 自动使用 CPU 核心数
+max_concurrent = 0
+
+# 单个下载超时（秒）
+timeout = 30
+
+# 失败重试次数
+retries = 3
+
+[notification]
+# 下载完成是否弹出 Windows 通知
+on_complete = true
+
+# 下载出错是否弹出通知
+on_error = true
+
+[advanced]
+# 剪贴板轮询间隔（毫秒）
+clipboard_poll_ms = 2000
