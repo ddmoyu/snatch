@@ -237,9 +237,13 @@ async fn clipboard_monitor(state: Arc<AppState>) {
         if is_downloaded(&state.db.lock().unwrap(), &content) { log("[skip]", "already downloaded"); continue; }
         { let mut proc = state.processing.lock().unwrap(); if proc.contains(&content) { continue; } proc.insert(content.clone()); }
         let st = state.clone(); let url = content.clone();
-        tokio::spawn(async move { process_url(&st, &url, &rule).await; st.processing.lock().unwrap().remove(&url); });
+        tokio::spawn(async move { let _guard = ProcGuard { state: st.clone(), url: url.clone() }; process_url(&st, &url, &rule).await; });
     }
 }
+
+// Removes the URL from the in-flight set even if the crawl task unwinds.
+struct ProcGuard { state: Arc<AppState>, url: String }
+impl Drop for ProcGuard { fn drop(&mut self) { if let Ok(mut p) = self.state.processing.lock() { p.remove(&self.url); } } }
 
 async fn process_url(state: &AppState, url: &str, rule: &ScraperRule) {
     log("[match]", &format!("{} -> {}", url, rule.name));
