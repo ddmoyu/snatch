@@ -4,10 +4,12 @@ Clipboard-driven crawler for images and novels. Copy a URL → auto-download eve
 
 ## Usage
 
-1. Start `snatch.exe` — green "P" icon appears in system tray
+1. Run `snatch` (or `cargo run`) — a terminal dashboard opens
 2. Edit `scraper.toml` to add your target sites
-3. Copy any matching URL to clipboard
-4. Content appears in `~/Desktop/Snatch/`
+3. Copy any matching URL to the clipboard — it's detected automatically
+4. Watch tasks in the dashboard; content lands in `~/Desktop/Snatch/`
+
+Keys: `q` quit · `↑↓` select task · `Enter` open its folder · `c` clear finished
 
 ## Features
 
@@ -17,7 +19,9 @@ Clipboard-driven crawler for images and novels. Copy a URL → auto-download eve
 - **Trad→Simp**: MediaWiki/OpenCC via zhconv
 - **Dedup**: SQLite, avoids re-downloading
 - **Filtering**: exclude selectors, watermark stripping
-- **9.4MB** binary, cross-platform
+- **Dashboard**: ratatui TUI — live task queue, progress bars, logs
+- **Event-driven**: clipboard-change listener (no busy polling on Windows/X11)
+- Cross-platform: Windows · macOS · Linux
 
 ## Example rules
 
