@@ -1,6 +1,6 @@
 // Snatch v0.3.0 - Clipboard image crawler with zhconv
 #![allow(unused_must_use)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
