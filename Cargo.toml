@@ -18,9 +18,10 @@ arboard = "3"
 dirs = "6"
 num_cpus = "1"
 url = "2"
-tray-icon = "0.19"
-muda = "0.15"
-tao = "0.30"
+ratatui = "0.29"
+tui-logger = "0.14"
+log = "0.4"
+clipboard-master = "4.0.0"
 
 [profile.release]
 opt-level = "s"       # size optimization

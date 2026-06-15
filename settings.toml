@@ -27,13 +27,8 @@ timeout = 30
 # 失败重试次数
 retries = 3
 
-[notification]
-# 下载完成是否弹出 Windows 通知
-on_complete = true
-
-# 下载出错是否弹出通知
-on_error = true
-
 [advanced]
-# 剪贴板轮询间隔（毫秒）
+# 剪贴板检查间隔（毫秒）
+# 监听是事件驱动的：Windows / Linux(X11) 由系统在剪贴板变化时即时触发。
+# 本项仅在 macOS 上生效（macOS 无变化通知，只能轮询变化计数）。范围 200–5000。
 clipboard_poll_ms = 2000
