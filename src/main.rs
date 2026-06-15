@@ -152,7 +152,9 @@ async fn fetch_detail_pages(detail_urls: &[String], rule: &ScraperRule, client: 
     let fd = rule.follow_detail.as_ref().unwrap();
     let selectors = if fd.selectors.is_empty() { &rule.selectors } else { &fd.selectors };
     let container = fd.container.as_ref().or(rule.container.as_ref());
-    for detail_url in detail_urls {
+    let delay = rule.delay_ms.unwrap_or(300);
+    for (di, detail_url) in detail_urls.iter().enumerate() {
+        if di > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
         if let Ok(resp) = client.get(detail_url).send().await { if let Ok(html) = resp.text().await { let imgs = { let doc = Html::parse_document(&html); extract_images_impl(&doc, selectors, container, detail_url, &rule.exclude) }; images.extend(imgs); } }
     }
     images.sort(); images.dedup(); images
