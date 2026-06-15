@@ -193,7 +193,7 @@ async fn download_all(title: String, images: &[String], page_url: &str, settings
         log("[txt]", &format!("saved {} chars", all_text.len()));
         return Ok(CrawlResult { title: sanitize_filename(&title), image_count: 1, download_dir: dest.to_string_lossy().to_string() });
     }
-    let max_c = if settings.download.max_concurrent == 0 { num_cpus::get().min(6).max(2) } else { settings.download.max_concurrent.min(6).max(1) };
+    let max_c = if settings.download.max_concurrent == 0 { num_cpus::get().min(6).max(2) } else { settings.download.max_concurrent.max(1) };
     let sem = Arc::new(tokio::sync::Semaphore::new(max_c)); let mut handles = Vec::new();
     for (i, img_url) in images.iter().enumerate() {
         let c = client.clone(); let u = img_url.clone(); let d = dest.join(filename_from_url(&u, i));
