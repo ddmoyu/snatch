@@ -62,11 +62,16 @@ fn is_downloaded(conn: &Connection, url: &str) -> bool { conn.query_row("SELECT 
 fn record_download(conn: &Connection, url: &str, title: &str, rule: &str, count: usize, dir: &str) { let _ = conn.execute("INSERT OR IGNORE INTO page_downloads (page_url,title,rule_name,image_count,download_dir) VALUES (?1,?2,?3,?4,?5)", params![url, title, rule, count as i64, dir]); }
 
 // ---- Crawler ----
+static RE_STYLE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?s)<style[^>]*>.*?</style>").unwrap());
+static RE_SCRIPT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?s)<script[^>]*>.*?</script>").unwrap());
+static RE_PATH_PAGE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"/\d+/$").unwrap());
+
 async fn crawl(url: &str, rule: &ScraperRule, settings: &Settings, client: &Client) -> Result<CrawlResult, BoxError> {
     log("[crawl]", url);
     let page_urls = collect_page_urls(url, rule, client).await?;
     log("[pages]", &format!("collecting {} pages", page_urls.len()));
-    let mut all_images = Vec::new();
+    // In image mode these are image URLs; in text mode each entry is one page's body text.
+    let mut items = Vec::new();
     let mut title = String::new();
     for (pi, page_url) in page_urls.iter().enumerate() {
         if pi > 0 { let delay = rule.delay_ms.unwrap_or(500); tokio::time::sleep(Duration::from_millis(delay)).await; }
@@ -77,10 +82,8 @@ async fn crawl(url: &str, rule: &ScraperRule, settings: &Settings, client: &Clie
         if rule.mode == "text" {
             html = html.replace("</p><p>", "\n\n").replace("</p>\n<p>", "\n\n");
             html = html.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
-            let re_style = regex::Regex::new(r"(?s)<style[^>]*>.*?</style>").unwrap();
-            html = re_style.replace_all(&html, "").to_string();
-            let re_script = regex::Regex::new(r"(?s)<script[^>]*>.*?</script>").unwrap();
-            html = re_script.replace_all(&html, "").to_string();
+            html = RE_STYLE.replace_all(&html, "").to_string();
+            html = RE_SCRIPT.replace_all(&html, "").to_string();
         }
         let (page_title, direct_images, detail_urls) = {
             let doc = Html::parse_document(&html);
@@ -90,14 +93,15 @@ async fn crawl(url: &str, rule: &ScraperRule, settings: &Settings, client: &Clie
         };
         if !page_title.is_empty() { title = page_title; }
         log("[page]", &format!("{}: {} bytes, {} img, {} detail", pi+1, html.len(), direct_images.len(), detail_urls.len()));
-        all_images.extend(direct_images);
-        if !detail_urls.is_empty() { let detail_imgs = fetch_detail_pages(&detail_urls, rule, client).await; all_images.extend(detail_imgs); }
+        items.extend(direct_images);
+        if !detail_urls.is_empty() { let detail_imgs = fetch_detail_pages(&detail_urls, rule, client).await; items.extend(detail_imgs); }
     }
-    all_images.sort(); all_images.dedup();
-    log("[images]", &format!("total {}", all_images.len()));
-    if all_images.is_empty() { return Err("no images found".into()); }
+    // Image URLs can be sorted/deduped freely; text pages must keep page order, so only touch image mode.
+    if rule.mode != "text" { items.sort(); items.dedup(); }
+    log("[items]", &format!("total {}", items.len()));
+    if items.is_empty() { return Err("nothing extracted".into()); }
     if rule.mode == "text" && rule.convert.as_deref() == Some("simplify") { title = zhconv(&title, "zh-Hans".parse().unwrap()); }
-    download_all(title, &all_images, url, settings, client, &rule.mode, &rule.strip, rule.convert.as_deref()).await
+    download_all(title, &items, url, settings, client, &rule.mode, rule.convert.as_deref()).await
 }
 
 async fn collect_page_urls(start_url: &str, rule: &ScraperRule, client: &Client) -> Result<Vec<String>, BoxError> {
@@ -105,8 +109,8 @@ async fn collect_page_urls(start_url: &str, rule: &ScraperRule, client: &Client)
     if let Some(ref p) = rule.pagination {
         match p.pagination_type.as_str() {
             "query" => { if let (Some(param), Some(start), Some(end)) = (&p.param, p.start, p.end) { urls.clear(); for page in start..=end { let sep = if start_url.contains('?') { "&" } else { "?" }; urls.push(format!("{}{}{}={}", start_url, sep, param, page)); } } }
-            "path" => { if let (Some(start), Some(end)) = (p.start, p.end) { let re = regex::Regex::new(r"/\d+/$").unwrap(); let base = re.replace(start_url, "/").to_string(); urls.clear(); for page in start..=end { urls.push(if page == 1 { base.to_string() } else { format!("{}{}/", base, page) }); } } }
-            "next_link" => { let max = p.max_pages.unwrap_or(10); let mut current = start_url.to_string(); for _ in 1..max { let resp = match client.get(&current).header("Accept-Language", "zh-CN,zh;q=0.9").send().await { Ok(r) => r.text().await.ok().unwrap_or_default(), Err(_) => break }; let doc = Html::parse_document(&resp); let ns = p.next_selector.as_deref().unwrap_or("a.next"); let next_href = Selector::parse(ns).ok().and_then(|sel| doc.select(&sel).filter_map(|el| el.value().attr("href")).next()); match next_href { Some(href) => { current = resolve_url(href, &current); urls.push(current.clone()); } None => break } } }
+            "path" => { if let (Some(start), Some(end)) = (p.start, p.end) { let base = RE_PATH_PAGE.replace(start_url, "/").to_string(); urls.clear(); for page in start..=end { urls.push(if page == 1 { base.to_string() } else { format!("{}{}/", base, page) }); } } }
+            "next_link" => { let max = p.max_pages.unwrap_or(10); let mut current = start_url.to_string(); let mut seen: HashSet<String> = HashSet::new(); seen.insert(current.clone()); for _ in 1..max { let resp = match client.get(&current).header("Accept-Language", "zh-CN,zh;q=0.9").send().await { Ok(r) => r.text().await.ok().unwrap_or_default(), Err(_) => break }; let doc = Html::parse_document(&resp); let ns = p.next_selector.as_deref().unwrap_or("a.next"); let next_href = Selector::parse(ns).ok().and_then(|sel| doc.select(&sel).filter_map(|el| el.value().attr("href")).next()); match next_href { Some(href) => { let next = resolve_url(href, &current); if next.is_empty() || !seen.insert(next.clone()) { break; } current = next; urls.push(current.clone()); } None => break } } }
             _ => {}
         }
     }
@@ -172,10 +176,10 @@ fn extract_images_impl(doc: &Html, selectors: &[SelectorDef], container: Option<
 }
 
 // ---- Download ----
-async fn download_all(title: String, images: &[String], page_url: &str, settings: &Settings, client: &Client, mode: &str, strip: &[String], convert: Option<&str>) -> Result<CrawlResult, BoxError> {
+async fn download_all(title: String, images: &[String], page_url: &str, settings: &Settings, client: &Client, mode: &str, convert: Option<&str>) -> Result<CrawlResult, BoxError> {
     let base = expand_path(&settings.general.download_dir);
     let dir_name = reserve_dir_name(&title, &settings.general.dir_naming, &settings.general.dir_collision, &base);
-    let dest = base.join(&dir_name); tokio::fs::create_dir_all(&dest).await?;
+    let dest = base.join(&dir_name); tokio::fs::create_dir_all(&dest).await?; release_dir_lock(&dest);
     let is_text = mode == "text";
     if is_text {
         let mut all_text = images.join("\n\n==========\n\n");
@@ -275,7 +279,9 @@ fn open_dir(p: &Path) { #[cfg(target_os = "windows")] { let _ = std::process::Co
 fn parse_srcset_best(s: &str) -> String { let mut best_url = ""; let mut best_w = 0u64; for part in s.split(',') { let mut segs = part.trim().split_whitespace(); let url = segs.next().unwrap_or(""); let desc = segs.next().unwrap_or(""); let w = if let Some(d) = desc.strip_suffix('w') { d.parse::<u64>().unwrap_or(0) } else if let Some(d) = desc.strip_suffix('x') { (d.parse::<f64>().unwrap_or(1.0)*1000.0) as u64 } else { 0 }; if w >= best_w { best_w = w; best_url = url; } } if best_url.is_empty() { s.split(',').last().map(|x| x.trim().split_whitespace().next().unwrap_or("").to_string()).unwrap_or_default() } else { best_url.to_string() } }
 fn extract_title(doc: &Html) -> String { let sel = Selector::parse("title").unwrap(); doc.select(&sel).next().map(|e| e.text().collect::<String>().trim().to_string()).unwrap_or_else(|| "untitled".to_string()) }
 static DIR_LOCK: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-fn reserve_dir_name(title: &str, naming: &str, collision: &str, base: &Path) -> String { let mut locked = DIR_LOCK.lock().unwrap(); let bn = match naming { "title_timestamp" => format!("{}_{:010}", now_secs(), title), _ => title.to_string() }; let candidate = |n: Option<usize>| -> String { match collision { "timestamp" => format!("{}_{:010}", bn, now_secs()), "merge" => bn.clone(), _ => match n { Some(n) => format!("{}_{}", bn, n), None => bn.clone() } } }; let mut name = candidate(None); let mut path = base.join(&name); if !path.exists() && !locked.contains(&path) { locked.insert(path.clone()); return name; } if collision == "merge" { return name; } for n in 2..10000 { name = candidate(Some(n)); path = base.join(&name); if !path.exists() && !locked.contains(&path) { locked.insert(path.clone()); return name; } } name = format!("{}_{:010}", bn, now_secs()); locked.insert(base.join(&name)); name }
+// Once the directory exists on disk, its own presence guards the name, so drop the in-memory reservation.
+fn release_dir_lock(path: &Path) { if let Ok(mut l) = DIR_LOCK.lock() { l.remove(path); } }
+fn reserve_dir_name(title: &str, naming: &str, collision: &str, base: &Path) -> String { let mut locked = DIR_LOCK.lock().unwrap(); let bn = match naming { "title_timestamp" => format!("{}_{:010}", title, now_secs()), _ => title.to_string() }; let candidate = |n: Option<usize>| -> String { match collision { "timestamp" => match n { Some(n) => format!("{}_{:010}_{}", bn, now_secs(), n), None => format!("{}_{:010}", bn, now_secs()) }, "merge" => bn.clone(), _ => match n { Some(n) => format!("{}_{}", bn, n), None => bn.clone() } } }; let mut name = candidate(None); let mut path = base.join(&name); if !path.exists() && !locked.contains(&path) { locked.insert(path.clone()); return name; } if collision == "merge" { return name; } for n in 2..10000 { name = candidate(Some(n)); path = base.join(&name); if !path.exists() && !locked.contains(&path) { locked.insert(path.clone()); return name; } } name = format!("{}_{:010}", bn, now_secs()); locked.insert(base.join(&name)); name }
 
 // ---- Main ----
 fn main() {
