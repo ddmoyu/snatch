@@ -159,12 +159,14 @@ async fn fetch_detail_pages(detail_urls: &[String], rule: &ScraperRule, client: 
 }
 
 fn extract_images_impl(doc: &Html, selectors: &[SelectorDef], container: Option<&String>, base_url: &str, exclude: &[String]) -> Vec<String> {
+    let mut excluded = HashSet::new();
+    for ex in exclude { if let Ok(s) = Selector::parse(ex) { for e in doc.select(&s) { excluded.insert(e.id()); } } }
     let mut images = Vec::new();
     for sd in selectors {
         let expr = if let Some(c) = container { format!("{} {}", c, sd.expression) } else { sd.expression.clone() };
         let sel = match Selector::parse(&expr) { Ok(s) => s, Err(_) => continue };
         for el in doc.select(&sel) {
-            if exclude.iter().any(|ex| Selector::parse(ex).map(|s| doc.select(&s).any(|e| e.id() == el.id())).unwrap_or(false)) { continue; }
+            if excluded.contains(&el.id()) { continue; }
             if let Some(val) = el.value().attr(&sd.attribute) {
                 let val = val.trim(); if val.is_empty() || val.starts_with("data:") || val.starts_with("blob:") { continue; }
                 let u = if sd.attribute == "srcset" { parse_srcset_best(val) } else { val.to_string() };
