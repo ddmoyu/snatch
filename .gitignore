@@ -5,3 +5,7 @@
 *.res
 resource.rc
 *.exe
+
+# local tooling caches
+/.codegraph/
+/.reasonix/
