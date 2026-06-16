@@ -5,10 +5,35 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 // ---- Global settings (settings.toml) ----
-#[derive(Deserialize)] pub struct Settings { pub general: GeneralSettings, pub download: DownloadSettings, pub advanced: AdvancedSettings }
-#[derive(Deserialize)] pub struct GeneralSettings { pub download_dir: String, pub dir_naming: String, pub dir_collision: String }
-#[derive(Deserialize)] pub struct DownloadSettings { pub max_concurrent: usize, pub timeout: u64, pub retries: u32 }
-#[derive(Deserialize)] pub struct AdvancedSettings { pub clipboard_poll_ms: u64 }
+// settings.toml is OPTIONAL. When it's absent (or a field is omitted) these defaults apply, and an
+// empty `download_dir` is resolved to `<app_dir>/data` in load_settings.
+fn default_naming() -> String { "title".to_string() }
+fn default_collision() -> String { "number".to_string() }
+fn default_timeout() -> u64 { 30 }
+fn default_retries() -> u32 { 3 }
+fn default_poll() -> u64 { 2000 }
+
+#[derive(Deserialize, Default)] pub struct Settings {
+    #[serde(default)] pub general: GeneralSettings,
+    #[serde(default)] pub download: DownloadSettings,
+    #[serde(default)] pub advanced: AdvancedSettings,
+}
+#[derive(Deserialize)] pub struct GeneralSettings {
+    #[serde(default)] pub download_dir: String, // empty -> <app_dir>/data (resolved in load_settings)
+    #[serde(default = "default_naming")] pub dir_naming: String,
+    #[serde(default = "default_collision")] pub dir_collision: String,
+}
+impl Default for GeneralSettings { fn default() -> Self { Self { download_dir: String::new(), dir_naming: default_naming(), dir_collision: default_collision() } } }
+#[derive(Deserialize)] pub struct DownloadSettings {
+    #[serde(default)] pub max_concurrent: usize,
+    #[serde(default = "default_timeout")] pub timeout: u64,
+    #[serde(default = "default_retries")] pub retries: u32,
+}
+impl Default for DownloadSettings { fn default() -> Self { Self { max_concurrent: 0, timeout: default_timeout(), retries: default_retries() } } }
+#[derive(Deserialize)] pub struct AdvancedSettings {
+    #[serde(default = "default_poll")] pub clipboard_poll_ms: u64,
+}
+impl Default for AdvancedSettings { fn default() -> Self { Self { clipboard_poll_ms: default_poll() } } }
 
 // ---- Source model ----
 fn default_true() -> bool { true }
@@ -116,54 +141,28 @@ impl Source {
     }
 }
 
-// ---- Defaults written on first run ----
-const DEFAULT_SETTINGS: &str = r##"# Snatch Settings
-[general]
-download_dir = "~/Desktop/Snatch"
-dir_naming = "title"
-dir_collision = "number"
-[download]
-max_concurrent = 0
-timeout = 30
-retries = 3
-[advanced]
-# macOS-only clipboard poll interval (ms); Windows/X11 are event-driven. Range 200-5000.
-clipboard_poll_ms = 2000
-"##;
-
-const EXAMPLE_SOURCE: &str = r##"# 示例源:抓 dll-files 列表导出两列 CSV(name, url)
-name = "DLL-Files"
-type = "data"
-domains = ["dll-files.com"]
-match = "/a/"
-
-[data]
-row = "a[href$='.dll.html']"
-[[data.columns]]
-name = "name"
-get = "text"
-[[data.columns]]
-name = "url"
-get = "@href"
-"##;
-
 pub fn get_app_dir() -> PathBuf { std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_else(|| PathBuf::from(".")) }
 
+// Ensures the `sources/` rules directory exists (empty). No example rule is written, and
+// settings.toml is intentionally NOT created — its absence means "save under <app_dir>/data"
+// (see load_settings).
 pub fn ensure_configs(app_dir: &Path) {
     std::fs::create_dir_all(app_dir).ok();
-    let sp = app_dir.join("settings.toml");
-    if !sp.exists() { std::fs::write(&sp, DEFAULT_SETTINGS).ok(); }
-    let sources = app_dir.join("sources");
-    if !sources.exists() {
-        std::fs::create_dir_all(&sources).ok();
-        std::fs::write(sources.join("example.toml"), EXAMPLE_SOURCE).ok();
-    }
+    std::fs::create_dir_all(app_dir.join("sources")).ok();
 }
 
+// Loads settings.toml if present; otherwise uses built-in defaults. Either way, an unset
+// `download_dir` resolves to the program-sibling `data/` dir (created on demand at save time).
 pub fn load_settings(app_dir: &Path) -> Settings {
     let p = app_dir.join("settings.toml");
-    let c = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {}", p.display(), e));
-    toml::from_str(&c).unwrap_or_else(|e| panic!("parse {}: {}", p.display(), e))
+    let mut s: Settings = match std::fs::read_to_string(&p) {
+        Ok(c) => toml::from_str(&c).unwrap_or_else(|e| panic!("parse {}: {}", p.display(), e)),
+        Err(_) => Settings::default(),
+    };
+    if s.general.download_dir.trim().is_empty() {
+        s.general.download_dir = app_dir.join("data").to_string_lossy().into_owned();
+    }
+    s
 }
 
 // Loads every enabled `sources/*.toml`. A malformed source is logged and skipped, not fatal.
