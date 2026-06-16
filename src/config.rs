@@ -74,12 +74,15 @@ fn default_get() -> String { "text".to_string() }
     #[serde(default)] pub container: Option<String>,
     pub images: Vec<Field>,
     #[serde(default)] pub exclude: Vec<String>,
+    #[serde(default)] pub combine: Option<String>,
 }
 #[derive(Deserialize, Clone)] pub struct ImageRules {
     #[serde(default)] pub container: Option<String>,
     pub images: Vec<Field>,
     #[serde(default)] pub exclude: Vec<String>,
     #[serde(default)] pub detail: Option<ImageDetail>,
+    // How to combine the `images` selectors: "merge" (default, all + dedup) or "first" (first that hits).
+    #[serde(default)] pub combine: Option<String>,
 }
 
 #[derive(Deserialize, Clone)] pub struct Source {

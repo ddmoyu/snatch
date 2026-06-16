@@ -138,6 +138,19 @@ fn extract_fields(doc: &Html, fields: &[Field], container: Option<&String>, base
     out
 }
 
+// Combines image selectors: "first" returns the first selector that yields any results (a fallback
+// chain, e.g. @data-src then @src); anything else merges them all (the default).
+fn extract_fields_combined(doc: &Html, fields: &[Field], container: Option<&String>, base_url: &str, exclude: &[String], combine: Option<&str>) -> Vec<String> {
+    if combine == Some("first") {
+        for f in fields {
+            let v = extract_fields(doc, std::slice::from_ref(f), container, base_url, exclude);
+            if !v.is_empty() { return v; }
+        }
+        return Vec::new();
+    }
+    extract_fields(doc, fields, container, base_url, exclude)
+}
+
 // First match of a CSS selector in a document, as trimmed text.
 fn doc_text(doc: &Html, selector: Option<&str>) -> Option<String> {
     let sel = Selector::parse(selector?).ok()?;
@@ -230,7 +243,7 @@ async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task)
                     det.dedup();
                     (Vec::new(), det)
                 }
-                None => (extract_fields(&doc, &img.images, img.container.as_ref(), page, &img.exclude), Vec::new()),
+                None => (extract_fields_combined(&doc, &img.images, img.container.as_ref(), page, &img.exclude, img.combine.as_deref()), Vec::new()),
             }
         };
         images.extend(direct);
@@ -240,7 +253,7 @@ async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task)
                 sleep(delay).await;
                 if let Some(dhtml) = fetch(client, durl).await {
                     let doc = Html::parse_document(&dhtml);
-                    images.extend(extract_fields(&doc, &d.images, cont, durl, &d.exclude));
+                    images.extend(extract_fields_combined(&doc, &d.images, cont, durl, &d.exclude, d.combine.as_deref()));
                 }
             }
         }
@@ -393,5 +406,23 @@ mod tests {
         let url_col = Column { name: "url".into(), selector: Some("a".into()), get: "@href".into(), regex: None, replace: None };
         let rows: Vec<Vec<String>> = doc.select(&sel).map(|r| vec![extract_column(r, &name_col, "https://e.com/"), extract_column(r, &url_col, "https://e.com/")]).collect();
         assert_eq!(rows, vec![vec!["One".to_string(), "https://e.com/p1".into()], vec!["Two".into(), "https://e.com/p2".into()]]);
+    }
+
+    #[test]
+    fn combine_first_stops_at_first_hit() {
+        let doc = Html::parse_document(r#"<img data-src="/lazy.jpg" src="/placeholder.gif">"#);
+        let fields = vec![field("img", "@data-src"), field("img", "@src")];
+        // first: data-src hits, so the placeholder src is ignored
+        assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/lazy.jpg"]);
+        // merge (default): both are taken
+        assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], None), vec!["https://e.com/lazy.jpg", "https://e.com/placeholder.gif"]);
+    }
+
+    #[test]
+    fn combine_first_falls_back_when_empty() {
+        let doc = Html::parse_document(r#"<img src="/a.jpg">"#);
+        let fields = vec![field("img", "@data-src"), field("img", "@src")];
+        // data-src yields nothing, so it falls back to src
+        assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/a.jpg"]);
     }
 }
