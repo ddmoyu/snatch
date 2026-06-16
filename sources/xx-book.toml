@@ -1,0 +1,9 @@
+name = "xx-book小说"
+type = "text"
+domains = ["xx-book.com"]
+
+[text]
+content = ".entry-content"
+get = "text"
+convert = "simplify"
+strip = ["book18.org"]

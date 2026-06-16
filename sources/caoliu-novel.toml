@@ -1,0 +1,13 @@
+name = "草榴小说"
+type = "text"
+domains = ["t66y.com"]
+match = "/20/"
+
+[text]
+content = ".tpc_content"
+get = "text"
+
+[pagination]
+type = "next_link"
+next = "a[href*='page=']"
+max = 20

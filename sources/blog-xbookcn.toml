@@ -1,0 +1,7 @@
+name = "Blog小说"
+type = "text"
+domains = ["blog.xbookcn.net"]
+
+[text]
+content = ".post-body"
+get = "text"

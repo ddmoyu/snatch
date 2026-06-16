@@ -1,0 +1,12 @@
+name = "草榴图片"
+type = "image"
+domains = ["t66y.com"]
+match = "/16/"
+
+[image]
+container = ".tpc_content"
+images = [
+    { selector = "img", get = "@data-src" },
+    { selector = "img", get = "@ess-data" },
+    { selector = "img", get = "@src" },
+]

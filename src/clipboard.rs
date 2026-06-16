@@ -2,11 +2,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{effective_output, ScraperRule};
+use crate::config::Source;
 use crate::crawler::crawl;
 use crate::db::{is_downloaded, record_download};
 use crate::state::{AppState, Task, TaskData, TaskStatus};
-use crate::util::{find_matching_rule, is_url, log};
+use crate::util::{find_matching_source, is_url, log};
 
 // On each OS clipboard-change event, read the text and forward it to the async dispatcher.
 // Push-based on Windows (AddClipboardFormatListener) and Linux/X11 (XFixes); on macOS
@@ -27,7 +27,7 @@ impl clipboard_master::ClipboardHandler for ClipHandler {
     fn sleep_interval(&self) -> Duration { Duration::from_millis(self.poll_ms.clamp(200, 5000)) }
 }
 
-// Receives raw clipboard text from the listener thread and applies the URL/rule/dedup gating,
+// Receives raw clipboard text from the listener thread, applies the URL/source/dedup gating,
 // then enqueues a crawl. Lives on the tokio runtime so it can spawn tasks and touch shared state.
 pub async fn clipboard_dispatcher(state: Arc<AppState>, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
     let mut last = String::new();
@@ -36,31 +36,47 @@ pub async fn clipboard_dispatcher(state: Arc<AppState>, mut rx: tokio::sync::mps
         let content = raw.trim().to_string();
         if content == last || !is_url(&content) { continue; }
         last = content.clone();
-        let rule = match find_matching_rule(&state.rules, &content) { Some(r) => r.clone(), None => continue };
-        if is_downloaded(&state.db.lock().unwrap(), &content) { log("[skip]", "already downloaded"); continue; }
-        { let mut proc = state.processing.lock().unwrap(); if proc.contains(&content) { continue; } proc.insert(content.clone()); }
-        let task: Task = Arc::new(std::sync::Mutex::new(TaskData::new(&content, &rule.name, &rule.mode, effective_output(&rule))));
-        state.tasks.lock().unwrap().push(task.clone());
-        let st = state.clone(); let url = content.clone();
-        tokio::spawn(async move {
-            let _guard = ProcGuard { state: st.clone(), url: url.clone() };
-            let _permit = match st.task_sem.clone().acquire_owned().await { Ok(p) => p, Err(_) => return };
-            { let mut g = task.lock().unwrap(); g.status = TaskStatus::Running; g.started = Some(Instant::now()); }
-            process_url(&st, &url, &rule, &task).await;
-        });
+        enqueue(&state, content, false);
     }
+}
+
+// Receives URLs to re-run (from the TUI's retry key) and enqueues them, bypassing the
+// already-downloaded dedup so a finished or failed item can be fetched again.
+pub async fn retry_dispatcher(state: Arc<AppState>, mut rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+    while let Some(url) = rx.recv().await {
+        if state.cancel.is_cancelled() { return; }
+        log("[retry]", &url);
+        enqueue(&state, url, true);
+    }
+}
+
+// Matches a URL to a source and spawns its crawl. `force` skips the SQLite dedup (used by retry).
+// The in-flight guard always applies, so the same URL can't run twice concurrently.
+pub fn enqueue(state: &Arc<AppState>, url: String, force: bool) {
+    let source = match find_matching_source(&state.sources, &url) { Some(s) => s.clone(), None => return };
+    if !force && is_downloaded(&state.db.lock().unwrap(), &url) { log("[skip]", "already downloaded"); return; }
+    { let mut proc = state.processing.lock().unwrap(); if proc.contains(&url) { return; } proc.insert(url.clone()); }
+    let task: Task = Arc::new(std::sync::Mutex::new(TaskData::new(&url, &source.name, &source.kind, source.output())));
+    state.tasks.lock().unwrap().push(task.clone());
+    let st = state.clone();
+    tokio::spawn(async move {
+        let _guard = ProcGuard { state: st.clone(), url: url.clone() };
+        let _permit = match st.task_sem.clone().acquire_owned().await { Ok(p) => p, Err(_) => return };
+        { let mut g = task.lock().unwrap(); g.status = TaskStatus::Running; g.started = Some(Instant::now()); }
+        process_url(&st, &url, &source, &task).await;
+    });
 }
 
 // Removes the URL from the in-flight set even if the crawl task unwinds.
 struct ProcGuard { state: Arc<AppState>, url: String }
 impl Drop for ProcGuard { fn drop(&mut self) { if let Ok(mut p) = self.state.processing.lock() { p.remove(&self.url); } } }
 
-async fn process_url(state: &AppState, url: &str, rule: &ScraperRule, task: &Task) {
-    log("[match]", &format!("{} -> {}", url, rule.name));
-    match crawl(url, rule, &state.settings, &state.client, task).await {
+async fn process_url(state: &AppState, url: &str, source: &Source, task: &Task) {
+    log("[match]", &format!("{} -> {}", url, source.name));
+    match crawl(url, source, &state.settings, &state.client, task).await {
         Ok(r) => {
-            { let db = state.db.lock().unwrap(); record_download(&db, url, &r.title, &rule.name, r.image_count, &r.download_dir); }
-            log("[ok]", &format!("{} - {} items", r.title, r.image_count));
+            { let db = state.db.lock().unwrap(); record_download(&db, url, &r.title, &source.name, r.count, &r.download_dir); }
+            log("[ok]", &format!("{} - {} items", r.title, r.count));
             { let mut g = task.lock().unwrap(); g.status = TaskStatus::Done; g.title = r.title.clone(); g.download_dir = r.download_dir.clone(); g.finished = Some(Instant::now()); }
         }
         Err(e) => {

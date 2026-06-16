@@ -1,0 +1,14 @@
+# 列表导出 CSV(name, url)
+name = "DLL-Files"
+type = "data"
+domains = ["dll-files.com"]
+match = "/a/"
+
+[data]
+row = "a[href$='.dll.html']"
+[[data.columns]]
+name = "name"
+get = "text"
+[[data.columns]]
+name = "url"
+get = "@href"

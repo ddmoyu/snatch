@@ -1,0 +1,13 @@
+name = "sosing小说"
+type = "text"
+domains = ["sosing.com"]
+
+[text]
+content = ".entry-content"
+get = "text"
+convert = "simplify"
+
+[pagination]
+type = "path"
+start = 1
+end = 10

@@ -1,0 +1,9 @@
+name = "Photos18"
+type = "image"
+domains = ["photos18.com"]
+
+[image]
+container = "#content"
+images = [
+    { selector = "img", get = "@src" },
+]
