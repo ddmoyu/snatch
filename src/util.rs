@@ -1,4 +1,5 @@
 // Small cross-cutting helpers: logging, URL/path utilities, HTML helpers.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use log::{info, warn};
@@ -13,6 +14,34 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub fn log(tag: &str, msg: &str) { if tag.contains("err") || tag.contains("fail") { warn!("{} {}", tag, msg); } else { info!("{} {}", tag, msg); } }
 
 pub fn now_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
+
+// Expands ${VAR} in a string from environment variables (unset -> empty); unmatched ${ stays literal.
+pub fn expand_env(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start + 2..].find('}') {
+            let var = &rest[start + 2..start + 2 + end];
+            out.push_str(&std::env::var(var).unwrap_or_default());
+            rest = &rest[start + 2 + end + 1..];
+        } else {
+            out.push_str(&rest[start..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+// Prepares a source's custom headers: expands ${ENV} in values and drops User-Agent
+// (left to the TLS emulation, so the UA and fingerprint stay consistent).
+pub fn build_headers(raw: &HashMap<String, String>) -> Vec<(String, String)> {
+    raw.iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("user-agent"))
+        .map(|(k, v)| (k.clone(), expand_env(v)))
+        .collect()
+}
 pub fn is_url(s: &str) -> bool { let s = s.trim(); (s.starts_with("http://") || s.starts_with("https://")) && s.contains('.') }
 // First source whose domains match the URL host and whose optional `match` substring is present.
 pub fn find_matching_source<'a>(sources: &'a [Source], url: &str) -> Option<&'a Source> {
@@ -49,3 +78,28 @@ pub fn open_dir(p: &Path) {
 }
 pub fn parse_srcset_best(s: &str) -> String { let mut best_url = ""; let mut best_w = 0u64; for part in s.split(',') { let mut segs = part.trim().split_whitespace(); let url = segs.next().unwrap_or(""); let desc = segs.next().unwrap_or(""); let w = if let Some(d) = desc.strip_suffix('w') { d.parse::<u64>().unwrap_or(0) } else if let Some(d) = desc.strip_suffix('x') { (d.parse::<f64>().unwrap_or(1.0)*1000.0) as u64 } else { 0 }; if w >= best_w { best_w = w; best_url = url; } } if best_url.is_empty() { s.split(',').last().map(|x| x.trim().split_whitespace().next().unwrap_or("").to_string()).unwrap_or_default() } else { best_url.to_string() } }
 pub fn extract_title(doc: &Html) -> String { let sel = Selector::parse("title").unwrap(); doc.select(&sel).next().map(|e| e.text().collect::<String>().trim().to_string()).unwrap_or_else(|| "untitled".to_string()) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_env_substitutes_and_keeps_literals() {
+        std::env::set_var("SNATCH_TEST_VAR", "secret123");
+        assert_eq!(expand_env("a=${SNATCH_TEST_VAR};b"), "a=secret123;b");
+        assert_eq!(expand_env("no vars"), "no vars");
+        assert_eq!(expand_env("${SNATCH_UNSET_9z}!"), "!"); // unset -> empty
+        assert_eq!(expand_env("unclosed ${X"), "unclosed ${X"); // left literal
+    }
+
+    #[test]
+    fn build_headers_drops_ua_and_expands_env() {
+        std::env::set_var("SNATCH_TEST_COOKIE", "sid=1");
+        let mut raw = HashMap::new();
+        raw.insert("User-Agent".to_string(), "spoofed".to_string());
+        raw.insert("Cookie".to_string(), "x=${SNATCH_TEST_COOKIE}".to_string());
+        let out = build_headers(&raw);
+        assert!(!out.iter().any(|(k, _)| k.eq_ignore_ascii_case("user-agent")));
+        assert!(out.iter().any(|(k, v)| k == "Cookie" && v == "x=sid=1"));
+    }
+}

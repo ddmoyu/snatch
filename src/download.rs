@@ -10,7 +10,7 @@ use wreq::Client;
 use crate::config::{Settings, Source};
 use crate::crawler::{CrawlResult, Extracted};
 use crate::state::Task;
-use crate::util::{expand_path, filename_from_url, log, now_secs, sanitize_filename, BoxError};
+use crate::util::{build_headers, expand_path, filename_from_url, log, now_secs, sanitize_filename, BoxError};
 
 fn csv_cell(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }
 
@@ -64,6 +64,7 @@ pub async fn persist(title: String, extracted: Extracted, source: &Source, setti
             { let mut g = task.lock().unwrap(); g.total = urls.len(); g.done = 0; }
             let max_c = if settings.download.max_concurrent == 0 { num_cpus::get().min(6).max(2) } else { settings.download.max_concurrent.max(1) };
             let sem = Arc::new(tokio::sync::Semaphore::new(max_c));
+            let headers = Arc::new(build_headers(&source.headers));
             let mut handles = Vec::new();
             for (i, img_url) in urls.iter().enumerate() {
                 let c = client.clone();
@@ -74,9 +75,10 @@ pub async fn persist(title: String, extracted: Extracted, source: &Source, setti
                 let to = settings.download.timeout;
                 let referer = page_url.to_string();
                 let tk = task.clone();
+                let hdrs = headers.clone();
                 handles.push(tokio::spawn(async move {
                     let _p = s.acquire().await.expect("semaphore");
-                    let r = download_with_retry(&c, &u, &d, to, ret, &referer).await;
+                    let r = download_with_retry(&c, &u, &d, to, ret, &referer, &hdrs).await;
                     if r.is_ok() { tk.lock().unwrap().done += 1; }
                     r
                 }));
@@ -99,17 +101,21 @@ pub async fn persist(title: String, extracted: Extracted, source: &Source, setti
     }
 }
 
-async fn download_with_retry(client: &Client, url: &str, dest: &Path, to: u64, retries: u32, referer: &str) -> Result<(), BoxError> {
+async fn download_with_retry(client: &Client, url: &str, dest: &Path, to: u64, retries: u32, referer: &str, headers: &[(String, String)]) -> Result<(), BoxError> {
     let mut last = String::new();
     for attempt in 0..=retries {
         if attempt > 0 { tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await; }
-        match download_one(client, url, dest, to, referer).await { Ok(_) => return Ok(()), Err(e) => last = e.to_string() }
+        match download_one(client, url, dest, to, referer, headers).await { Ok(_) => return Ok(()), Err(e) => last = e.to_string() }
     }
     Err(format!("failed after {} retries: {}", retries, last).into())
 }
 
-async fn download_one(client: &Client, url: &str, dest: &Path, to: u64, referer: &str) -> Result<(), BoxError> {
-    let resp = client.get(url).header("Referer", referer).header("Accept", "image/avif,image/webp,image/*,*/*;q=0.8").header("Accept-Language", "en-US,en;q=0.9").timeout(Duration::from_secs(to)).send().await?;
+async fn download_one(client: &Client, url: &str, dest: &Path, to: u64, referer: &str, headers: &[(String, String)]) -> Result<(), BoxError> {
+    let mut req = client.get(url).header("Accept", "image/avif,image/webp,image/*,*/*;q=0.8").header("Accept-Language", "en-US,en;q=0.9").timeout(Duration::from_secs(to));
+    // The embedding page is the natural Referer for hotlink-protected images; a source-set Referer wins.
+    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("referer")) { req = req.header("Referer", referer); }
+    for (k, v) in headers { req = req.header(k.as_str(), v.as_str()); }
+    let resp = req.send().await?;
     if !resp.status().is_success() { return Err(format!("HTTP {}", resp.status()).into()); }
     let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
     if !ct.starts_with("image/") && !ct.is_empty() { log("[skip]", &format!("not image: {}", ct)); return Err(format!("not image: {}", ct).into()); }

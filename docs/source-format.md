@@ -60,6 +60,25 @@ max   = 20             # 最多翻几页
 
 ---
 
+## 自定义请求头(`[headers]`,可选)
+
+少数站需要特定 `Referer` / `Cookie` / token(防盗链、年龄门、AJAX 接口)。在源里加:
+
+```toml
+[headers]
+Referer = "https://site.com/list"        # 覆盖默认的同源 Referer
+Cookie  = "over18=1; sid=${SITE_SID}"     # 值支持 ${ENV} 环境变量插值
+X-Requested-With = "XMLHttpRequest"
+```
+
+- 作用于该源的**所有请求**(页面/章节/详情/分页 + 图片下载)。
+- 显式 `Referer` 覆盖自动的同源 Referer;不写就用自动的(已能解决大多数 403)。
+- 值里的 `${VAR}` 用环境变量替换 —— **密钥(cookie/token)放环境变量,别明文写进会进 git 的源文件**。
+- `User-Agent` 会被忽略(交给内置 Chrome 仿真,保持 UA 与 TLS 指纹一致)。
+- 仅支持**静态**头;需要登录流程(POST 换 cookie)的站不在此列。
+
+---
+
 ## type = "data" —— 结构化导出 CSV
 
 抓"行 + 列"的结构,导出多列 CSV。
@@ -219,7 +238,6 @@ images = [
 ## 已知限制(后续里程碑补)
 
 - **章节内分页 / 目录页分页**:`chapters` 暂只抓单页目录、单页章节;留 `chapters.pagination` 以后加。
-- **每源自定义请求头**:防盗链 `Referer` / `cookie` 暂用全局默认;留 `[headers]` 以后加。
 - **字符集**:暂靠响应头自动解码(GBK 误标可能乱码);留 `encoding` 以后加。
 - **data 行**:保持页面顺序、不去重(与 image 的排序去重相反);某列取空仍输出该行。
 

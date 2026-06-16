@@ -1,4 +1,5 @@
 // Global settings + per-site "source" definitions (one TOML file per source under sources/).
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -93,6 +94,7 @@ fn default_get() -> String { "text".to_string() }
     #[serde(rename = "match", default)] pub match_: Option<String>,
     #[serde(default = "default_true")] pub enabled: bool,
     #[serde(default)] pub format: Option<String>, // html (default) | json
+    #[serde(default)] pub headers: HashMap<String, String>, // extra request headers (values may use ${ENV})
 
     #[serde(default)] pub output: Option<String>,
     #[serde(default)] pub delay_ms: Option<u64>,

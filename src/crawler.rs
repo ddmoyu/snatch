@@ -11,7 +11,7 @@ use zhconv::zhconv;
 
 use crate::config::{Chapters, Column, DataRules, Field, ImageRules, Pagination, Source, TextRules};
 use crate::state::Task;
-use crate::util::{extract_title, log, parse_srcset_best, resolve_url, sanitize_filename, BoxError};
+use crate::util::{build_headers, extract_title, log, parse_srcset_best, resolve_url, sanitize_filename, BoxError};
 
 pub struct CrawlResult { pub title: String, pub count: usize, pub download_dir: String }
 
@@ -39,12 +39,16 @@ pub async fn crawl(url: &str, source: &Source, settings: &crate::config::Setting
 
 // ---- Shared fetch / pagination ----
 
-async fn fetch(client: &Client, url: &str) -> Option<String> {
-    // A same-origin Referer gets past common anti-hotlink / Cloudflare checks that 403 "direct" hits.
+async fn fetch(client: &Client, url: &str, headers: &[(String, String)]) -> Option<String> {
     let mut req = client.get(url).header("Accept-Language", "zh-CN,zh;q=0.9");
-    if let Some(origin) = url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h))) {
-        req = req.header("Referer", origin);
+    // A same-origin Referer gets past common anti-hotlink / Cloudflare checks that 403 "direct" hits;
+    // a source-configured Referer overrides it.
+    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("referer")) {
+        if let Some(origin) = url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h))) {
+            req = req.header("Referer", origin);
+        }
     }
+    for (k, v) in headers { req = req.header(k.as_str(), v.as_str()); }
     let resp = req.send().await.ok()?;
     if !resp.status().is_success() { log("[page-err]", &format!("HTTP {}: {}", resp.status(), url)); return None; }
     resp.text().await.ok()
@@ -52,7 +56,7 @@ async fn fetch(client: &Client, url: &str) -> Option<String> {
 
 async fn sleep(ms: u64) { tokio::time::sleep(Duration::from_millis(ms)).await; }
 
-async fn collect_page_urls(start_url: &str, pg: Option<&Pagination>, client: &Client) -> Vec<String> {
+async fn collect_page_urls(start_url: &str, pg: Option<&Pagination>, client: &Client, headers: &[(String, String)]) -> Vec<String> {
     let mut urls = vec![start_url.to_string()];
     let pg = match pg { Some(p) => p, None => return urls };
     match pg.kind.as_str() {
@@ -65,7 +69,7 @@ async fn collect_page_urls(start_url: &str, pg: Option<&Pagination>, client: &Cl
             let mut seen: HashSet<String> = HashSet::new();
             seen.insert(cur.clone());
             for _ in 1..max {
-                let html = match fetch(client, &cur).await { Some(h) => h, None => break };
+                let html = match fetch(client, &cur, headers).await { Some(h) => h, None => break };
                 let next = {
                     let doc = Html::parse_document(&html);
                     Selector::parse(ns).ok().and_then(|sel| doc.select(&sel).filter_map(|el| el.value().attr("href")).next().map(|h| resolve_url(h, &cur)))
@@ -239,13 +243,14 @@ async fn extract_data(url: &str, source: &Source, client: &Client, task: &Task) 
         return extract_data_json(url, source, data, client, task).await;
     }
     let delay = source.delay_ms.unwrap_or(300);
-    let pages = collect_page_urls(url, source.pagination.as_ref(), client).await;
-    let headers: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
+    let headers = build_headers(&source.headers);
+    let pages = collect_page_urls(url, source.pagination.as_ref(), client, &headers).await;
+    let col_names: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
     let mut rows = Vec::new();
     let mut title = String::new();
     for (i, page) in pages.iter().enumerate() {
         if i > 0 { sleep(delay).await; }
-        let html = match fetch(client, page).await { Some(h) => h, None => continue };
+        let html = match fetch(client, page, &headers).await { Some(h) => h, None => continue };
         let doc = Html::parse_document(&html);
         if title.is_empty() { title = sanitize_filename(&extract_title(&doc)); }
         let row_sel = match Selector::parse(&scoped(data.container.as_ref(), &data.row)) { Ok(s) => s, Err(_) => continue };
@@ -258,7 +263,7 @@ async fn extract_data(url: &str, source: &Source, client: &Client, task: &Task) 
         task.lock().unwrap().total = rows.len();
     }
     if rows.is_empty() { return Err("nothing extracted".into()); }
-    Ok((title, Extracted::Data { headers, rows }))
+    Ok((title, Extracted::Data { headers: col_names, rows }))
 }
 
 fn extract_column(row: ElementRef, col: &Column, base_url: &str) -> String {
@@ -274,14 +279,15 @@ fn extract_column(row: ElementRef, col: &Column, base_url: &str) -> String {
 async fn extract_data_json(url: &str, source: &Source, data: &DataRules, client: &Client, task: &Task) -> Result<(String, Extracted), BoxError> {
     use serde_json_path::JsonPath;
     let delay = source.delay_ms.unwrap_or(300);
-    let pages = collect_page_urls(url, source.pagination.as_ref(), client).await;
+    let headers = build_headers(&source.headers);
+    let pages = collect_page_urls(url, source.pagination.as_ref(), client, &headers).await;
     let row_path = JsonPath::parse(&data.row).map_err(|e| format!("bad row JSONPath '{}': {}", data.row, e))?;
     let col_paths: Vec<_> = data.columns.iter().map(|c| (c, JsonPath::parse(&c.get))).collect();
-    let headers: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
+    let col_names: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
     let mut rows: Vec<Vec<String>> = Vec::new();
     for (i, page) in pages.iter().enumerate() {
         if i > 0 { sleep(delay).await; }
-        let body = match fetch(client, page).await { Some(b) => b, None => continue };
+        let body = match fetch(client, page, &headers).await { Some(b) => b, None => continue };
         let v: serde_json::Value = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { log("[json-err]", &e.to_string()); continue; } };
         for rv in row_path.query(&v).all() {
             let cells = col_paths.iter().map(|(c, p)| {
@@ -294,7 +300,7 @@ async fn extract_data_json(url: &str, source: &Source, data: &DataRules, client:
         task.lock().unwrap().total = rows.len();
     }
     if rows.is_empty() { return Err("nothing extracted".into()); }
-    Ok((sanitize_filename(&source.name), Extracted::Data { headers, rows }))
+    Ok((sanitize_filename(&source.name), Extracted::Data { headers: col_names, rows }))
 }
 
 // Renders a JSON scalar as a CSV cell; arrays/objects fall back to their JSON text.
@@ -313,12 +319,13 @@ fn json_scalar(v: &serde_json::Value) -> String {
 async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task) -> Result<(String, Extracted), BoxError> {
     let img: &ImageRules = source.image.as_ref().ok_or("image source missing [image]")?;
     let delay = source.delay_ms.unwrap_or(300);
-    let pages = collect_page_urls(url, source.pagination.as_ref(), client).await;
+    let headers = build_headers(&source.headers);
+    let pages = collect_page_urls(url, source.pagination.as_ref(), client, &headers).await;
     let mut images = Vec::new();
     let mut title = String::new();
     for (i, page) in pages.iter().enumerate() {
         if i > 0 { sleep(delay).await; }
-        let html = match fetch(client, page).await { Some(h) => h, None => continue };
+        let html = match fetch(client, page, &headers).await { Some(h) => h, None => continue };
         let (direct, detail_urls) = {
             let doc = Html::parse_document(&html);
             if title.is_empty() { title = sanitize_filename(&extract_title(&doc)); }
@@ -340,7 +347,7 @@ async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task)
             let cont = d.container.as_ref().or(img.container.as_ref());
             for durl in &detail_urls {
                 sleep(delay).await;
-                if let Some(dhtml) = fetch(client, durl).await {
+                if let Some(dhtml) = fetch(client, durl, &headers).await {
                     let doc = Html::parse_document(&dhtml);
                     images.extend(extract_fields_combined(&doc, &dhtml, &d.images, cont, durl, &d.exclude, d.combine.as_deref()));
                 }
@@ -359,15 +366,16 @@ async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task)
 async fn extract_text(url: &str, source: &Source, client: &Client, task: &Task) -> Result<(String, Extracted), BoxError> {
     let t: &TextRules = source.text.as_ref().ok_or("text source missing [text]")?;
     let delay = source.delay_ms.unwrap_or(300);
+    let headers = build_headers(&source.headers);
     if let Some(ch) = &t.chapters {
-        return extract_chapters(url, t, ch, client, task, delay).await;
+        return extract_chapters(url, t, ch, client, task, delay, &headers).await;
     }
-    let pages = collect_page_urls(url, source.pagination.as_ref(), client).await;
+    let pages = collect_page_urls(url, source.pagination.as_ref(), client, &headers).await;
     let (mut title, mut author, mut date) = (String::new(), String::new(), String::new());
     let mut parts: Vec<String> = Vec::new();
     for (i, page) in pages.iter().enumerate() {
         if i > 0 { sleep(delay).await; }
-        let html = match fetch(client, page).await { Some(h) => h, None => continue };
+        let html = match fetch(client, page, &headers).await { Some(h) => h, None => continue };
         let html = preprocess_text_html(&html);
         let doc = Html::parse_document(&html);
         if title.is_empty() { title = sanitize_filename(&doc_text(&doc, t.title.as_deref()).unwrap_or_else(|| extract_title(&doc))); }
@@ -395,8 +403,8 @@ async fn extract_text(url: &str, source: &Source, client: &Client, task: &Task) 
     finish_text(title, author, date, parts, t, sep)
 }
 
-async fn extract_chapters(url: &str, t: &TextRules, ch: &Chapters, client: &Client, task: &Task, delay: u64) -> Result<(String, Extracted), BoxError> {
-    let html = fetch(client, url).await.ok_or("toc fetch failed")?;
+async fn extract_chapters(url: &str, t: &TextRules, ch: &Chapters, client: &Client, task: &Task, delay: u64, headers: &[(String, String)]) -> Result<(String, Extracted), BoxError> {
+    let html = fetch(client, url, headers).await.ok_or("toc fetch failed")?;
     let (title, links) = {
         let doc = Html::parse_document(&html);
         let title = sanitize_filename(&doc_text(&doc, t.title.as_deref()).unwrap_or_else(|| extract_title(&doc)));
@@ -412,7 +420,7 @@ async fn extract_chapters(url: &str, t: &TextRules, ch: &Chapters, client: &Clie
     let mut parts = Vec::new();
     for (i, link) in links.iter().enumerate() {
         if i > 0 { sleep(delay).await; }
-        let chtml = match fetch(client, link).await { Some(h) => h, None => continue };
+        let chtml = match fetch(client, link, headers).await { Some(h) => h, None => continue };
         let chtml = preprocess_text_html(&chtml);
         let doc = Html::parse_document(&chtml);
         let body = doc_get(&doc, &ch.content, get, link).unwrap_or_default();
