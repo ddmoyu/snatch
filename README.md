@@ -1,53 +1,53 @@
 # Snatch
 
-Clipboard-driven crawler for images and novels. Copy a URL → auto-download everything matched by CSS selectors.
+Clipboard-driven crawler. Copy a URL → it's matched against your sources and
+auto-extracted (images, text, or structured data → CSV).
 
 ## Usage
 
 1. Run `snatch` (or `cargo run`) — a terminal dashboard opens
-2. Edit `scraper.toml` to add your target sites
+2. Add a source: drop a TOML file in `sources/` (one site per file) — see [docs/source-format.md](docs/source-format.md)
 3. Copy any matching URL to the clipboard — it's detected automatically
 4. Watch tasks in the dashboard; content lands in `~/Desktop/Snatch/`
 
 Keys: `q` quit · `↑↓` select task · `Enter` open its folder · `c` clear finished
 
-## Features
+## Source types
 
-- **Images**: CSS selectors, container scoping, detail page following
-- **Novels**: Text extraction with paragraph preservation
-- **Pagination**: query params, URL path, next-page links
-- **Trad→Simp**: MediaWiki/OpenCC via zhconv
-- **Dedup**: SQLite, avoids re-downloading
-- **Filtering**: exclude selectors, watermark stripping
-- **Dashboard**: ratatui TUI — live task queue, progress bars, logs
-- **Event-driven**: clipboard-change listener (no busy polling on Windows/X11)
-- Cross-platform: Windows · macOS · Linux
+One TOML file per site under `sources/`, with `type` =
 
-## Example rules
+- **data** — rows + columns → CSV (listings, tables, link dumps)
+- **text** — novels/news/forums; `single` / `sections` / `chapters` strategies → txt
+- **image** — galleries/manga; CSS selectors, container scoping, detail-page following → download
+
+Shared: pagination (query / path / next-page), per-field `get = "text|html|@href"` +
+regex purify, trad→simp (zhconv), SQLite dedup. Dashboard is a ratatui TUI with a live
+task queue, animated progress bars, and a log pane; clipboard watching is event-driven
+(no busy polling on Windows/X11). Cross-platform: Windows · macOS · Linux.
+
+## Example source
 
 ```toml
-[[rules]]
-name = "Example Image Site"
-domain = "example.com"
-container = ".gallery"
-selectors = [
-    { expression = "img", attribute = "src" },
-    { expression = "img", attribute = "data-src" },
-]
+# sources/example.toml — export a link listing to CSV
+name = "Example List"
+type = "data"
+domains = ["example.com"]
+match = "/list/"
 
-[[rules]]
-name = "Example Novel Site"
-domain = "novels.example.com"
-mode = "text"
-content_selector = ".entry-content"
-convert = "simplify"
-strip = ["watermark-text"]
-
-[rules.pagination]
-type = "next_link"
-next_selector = "a.next"
-max_pages = 20
+[data]
+row = "li.item"
+[[data.columns]]
+name = "title"
+selector = "a"
+get = "text"
+[[data.columns]]
+name = "url"
+selector = "a"
+get = "@href"
 ```
+
+See [docs/source-format.md](docs/source-format.md) for the full format and
+[docs/rule-engine-plan.md](docs/rule-engine-plan.md) for the roadmap (XPath / JSONPath / JS).
 
 ## Build
 
