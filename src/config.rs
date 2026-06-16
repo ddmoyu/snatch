@@ -19,6 +19,7 @@ fn default_get() -> String { "text".to_string() }
     #[serde(default = "default_get")] pub get: String,
     #[serde(default)] pub regex: Option<String>,
     #[serde(default)] pub replace: Option<String>,
+    #[serde(default)] pub engine: Option<String>, // css (default) | xpath
 }
 
 #[derive(Deserialize, Clone)] pub struct Column {

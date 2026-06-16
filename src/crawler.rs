@@ -120,12 +120,54 @@ fn scoped(container: Option<&String>, expr: &str) -> String {
     match container { Some(c) => format!("{} {}", c, expr), None => expr.to_string() }
 }
 
-// Runs a set of fields over a document (image/list extraction): scoped select + exclude + get + regex.
-fn extract_fields(doc: &Html, fields: &[Field], container: Option<&String>, base_url: &str, exclude: &[String]) -> Vec<String> {
+// Locates + extracts via XPath (skyscraper). The xpath selector is self-contained (CSS container/
+// exclude don't apply). Attribute nodes and @attr gets are URL-resolved; element text is verbatim.
+fn xpath_values(html: &str, selector: &str, get: &str, base_url: &str) -> Vec<String> {
+    use skyscraper::xpath::grammar::data_model::XpathItem;
+    use skyscraper::xpath::grammar::XpathItemTreeNode;
+    let tree = match skyscraper::html::parse(html) { Ok(t) => t, Err(_) => return Vec::new() };
+    let xp = match skyscraper::xpath::parse(selector) { Ok(x) => x, Err(_) => return Vec::new() };
+    let items = match xp.apply(&tree) { Ok(i) => i, Err(_) => return Vec::new() };
+    let (key, is_attr) = parse_get(get);
+    let mut out = Vec::new();
+    for item in items {
+        let (raw, url_like) = match item {
+            XpathItem::Node(node) => match node {
+                XpathItemTreeNode::AttributeNode(a) => (Some(a.value.to_string()), true),
+                XpathItemTreeNode::ElementNode(el) => {
+                    if is_attr { (el.get_attribute(&tree, key).map(|s| s.to_string()), true) } else { (node.text(&tree), false) }
+                }
+                _ => (node.text(&tree), false),
+            },
+            _ => (None, false),
+        };
+        if let Some(v) = raw {
+            let v = v.trim();
+            if v.is_empty() { continue; }
+            let val = if url_like {
+                if v.starts_with("data:") || v.starts_with("blob:") { continue; }
+                resolve_url(v, base_url)
+            } else { v.to_string() };
+            if !val.is_empty() { out.push(val); }
+        }
+    }
+    out
+}
+
+// Runs a set of fields over a document (image/list extraction). CSS fields use the parsed `doc`;
+// xpath fields (engine = "xpath") re-parse `html` with skyscraper. Each value is regex-purified.
+fn extract_fields(doc: &Html, html: &str, fields: &[Field], container: Option<&String>, base_url: &str, exclude: &[String]) -> Vec<String> {
     let mut excluded = HashSet::new();
     for ex in exclude { if let Ok(s) = Selector::parse(ex) { for e in doc.select(&s) { excluded.insert(e.id()); } } }
     let mut out = Vec::new();
     for f in fields {
+        if f.engine.as_deref() == Some("xpath") {
+            for v in xpath_values(html, &f.selector, &f.get, base_url) {
+                let v = purify(v, f.regex.as_deref(), f.replace.as_deref().unwrap_or(""));
+                if !v.is_empty() { out.push(v); }
+            }
+            continue;
+        }
         let sel = match Selector::parse(&scoped(container, &f.selector)) { Ok(s) => s, Err(_) => continue };
         for el in doc.select(&sel) {
             if excluded.contains(&el.id()) { continue; }
@@ -140,15 +182,15 @@ fn extract_fields(doc: &Html, fields: &[Field], container: Option<&String>, base
 
 // Combines image selectors: "first" returns the first selector that yields any results (a fallback
 // chain, e.g. @data-src then @src); anything else merges them all (the default).
-fn extract_fields_combined(doc: &Html, fields: &[Field], container: Option<&String>, base_url: &str, exclude: &[String], combine: Option<&str>) -> Vec<String> {
+fn extract_fields_combined(doc: &Html, html: &str, fields: &[Field], container: Option<&String>, base_url: &str, exclude: &[String], combine: Option<&str>) -> Vec<String> {
     if combine == Some("first") {
         for f in fields {
-            let v = extract_fields(doc, std::slice::from_ref(f), container, base_url, exclude);
+            let v = extract_fields(doc, html, std::slice::from_ref(f), container, base_url, exclude);
             if !v.is_empty() { return v; }
         }
         return Vec::new();
     }
-    extract_fields(doc, fields, container, base_url, exclude)
+    extract_fields(doc, html, fields, container, base_url, exclude)
 }
 
 // First match of a CSS selector in a document, as trimmed text.
@@ -285,7 +327,7 @@ async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task)
                     det.dedup();
                     (Vec::new(), det)
                 }
-                None => (extract_fields_combined(&doc, &img.images, img.container.as_ref(), page, &img.exclude, img.combine.as_deref()), Vec::new()),
+                None => (extract_fields_combined(&doc, &html, &img.images, img.container.as_ref(), page, &img.exclude, img.combine.as_deref()), Vec::new()),
             }
         };
         images.extend(direct);
@@ -295,7 +337,7 @@ async fn extract_image(url: &str, source: &Source, client: &Client, task: &Task)
                 sleep(delay).await;
                 if let Some(dhtml) = fetch(client, durl).await {
                     let doc = Html::parse_document(&dhtml);
-                    images.extend(extract_fields_combined(&doc, &d.images, cont, durl, &d.exclude, d.combine.as_deref()));
+                    images.extend(extract_fields_combined(&doc, &dhtml, &d.images, cont, durl, &d.exclude, d.combine.as_deref()));
                 }
             }
         }
@@ -411,16 +453,32 @@ mod tests {
     use crate::config::Field;
 
     fn field(selector: &str, get: &str) -> Field {
-        Field { selector: selector.into(), get: get.into(), regex: None, replace: None }
+        Field { selector: selector.into(), get: get.into(), regex: None, replace: None, engine: None }
     }
 
     #[test]
     fn get_text_and_attr() {
-        let doc = Html::parse_document(r#"<div id="c"><a href="/x.html">Hi <b>there</b></a></div>"#);
-        let t = extract_fields(&doc, &[field("a", "text")], None, "https://e.com/", &[]);
+        let html = r#"<div id="c"><a href="/x.html">Hi <b>there</b></a></div>"#;
+        let doc = Html::parse_document(html);
+        let t = extract_fields(&doc, html, &[field("a", "text")], None, "https://e.com/", &[]);
         assert_eq!(t, vec!["Hi there"]);
-        let h = extract_fields(&doc, &[field("a", "@href")], None, "https://e.com/", &[]);
+        let h = extract_fields(&doc, html, &[field("a", "@href")], None, "https://e.com/", &[]);
         assert_eq!(h, vec!["https://e.com/x.html"]);
+    }
+
+    #[test]
+    fn xpath_element_attr_and_attribute_node() {
+        let html = r#"<div id="c"><img src="/a.jpg"><a href="/x">Link</a></div>"#;
+        let doc = Html::parse_document(html);
+        let mut img = field("//img", "@src"); // element node + @attr
+        img.engine = Some("xpath".into());
+        assert_eq!(extract_fields(&doc, html, &[img], None, "https://e.com/", &[]), vec!["https://e.com/a.jpg"]);
+        let mut href = field("//a/@href", "text"); // attribute node directly
+        href.engine = Some("xpath".into());
+        assert_eq!(extract_fields(&doc, html, &[href], None, "https://e.com/", &[]), vec!["https://e.com/x"]);
+        let mut txt = field("//a", "text"); // element text
+        txt.engine = Some("xpath".into());
+        assert_eq!(extract_fields(&doc, html, &[txt], None, "https://e.com/", &[]), vec!["Link"]);
     }
 
     #[test]
@@ -433,11 +491,12 @@ mod tests {
 
     #[test]
     fn regex_purifies_field() {
-        let doc = Html::parse_document(r#"<span class="p">Price $1,299.00</span>"#);
+        let html = r#"<span class="p">Price $1,299.00</span>"#;
+        let doc = Html::parse_document(html);
         let mut f = field(".p", "text");
         f.regex = Some(r"[^0-9.]".into());
         f.replace = Some("".into());
-        assert_eq!(extract_fields(&doc, &[f], None, "https://e.com/", &[]), vec!["1299.00"]);
+        assert_eq!(extract_fields(&doc, html, &[f], None, "https://e.com/", &[]), vec!["1299.00"]);
     }
 
     #[test]
@@ -452,20 +511,22 @@ mod tests {
 
     #[test]
     fn combine_first_stops_at_first_hit() {
-        let doc = Html::parse_document(r#"<img data-src="/lazy.jpg" src="/placeholder.gif">"#);
+        let html = r#"<img data-src="/lazy.jpg" src="/placeholder.gif">"#;
+        let doc = Html::parse_document(html);
         let fields = vec![field("img", "@data-src"), field("img", "@src")];
         // first: data-src hits, so the placeholder src is ignored
-        assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/lazy.jpg"]);
+        assert_eq!(extract_fields_combined(&doc, html, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/lazy.jpg"]);
         // merge (default): both are taken
-        assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], None), vec!["https://e.com/lazy.jpg", "https://e.com/placeholder.gif"]);
+        assert_eq!(extract_fields_combined(&doc, html, &fields, None, "https://e.com/", &[], None), vec!["https://e.com/lazy.jpg", "https://e.com/placeholder.gif"]);
     }
 
     #[test]
     fn combine_first_falls_back_when_empty() {
-        let doc = Html::parse_document(r#"<img src="/a.jpg">"#);
+        let html = r#"<img src="/a.jpg">"#;
+        let doc = Html::parse_document(html);
         let fields = vec![field("img", "@data-src"), field("img", "@src")];
         // data-src yields nothing, so it falls back to src
-        assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/a.jpg"]);
+        assert_eq!(extract_fields_combined(&doc, html, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/a.jpg"]);
     }
 
     #[test]

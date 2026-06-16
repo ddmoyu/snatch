@@ -43,7 +43,7 @@ delay_ms = 300                  # 可选:多次请求(分页/跟进)之间的间
   - 属性:`@href` / `@src` / `@data-src` / `@srcset`(`@` 前缀=属性,消除歧义)
   - 默认 `text`。
 - `regex` / `replace` —— 可选正则净化(对取到的值做替换,`replace` 默认空=删除)。
-- `engine` —— 可选 `css`(默认)/ `xpath` / `json`(后续里程碑)。
+- `engine` —— 可选 `css`(默认)/ `xpath`(image 选择器支持)。xpath 表达式自带定位,不吃 `container`/`exclude`;`get` 仍用 `@src` / `text` 等,或直接写属性 xpath `//img/@src`。
 
 ## 分页(可选,所有类型共用)
 
@@ -205,6 +205,14 @@ end   = 5
 
 - 产物:图片文件下载到 `<标题>/`。
 - `output`:`files`(默认,下载)| `csv`(只导出图片链接列表)。
+
+XPath 选择器(CSS 难表达时):
+```toml
+[image]
+images = [
+    { selector = "//div[@id='content']//img", get = "@src", engine = "xpath" },
+]
+```
 
 ---
 
