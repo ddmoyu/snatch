@@ -1,8 +1,8 @@
 // Small cross-cutting helpers: logging, URL/path utilities, HTML helpers.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
-use log::{info, warn};
 use scraper::{Html, Selector};
 use url::Url;
 
@@ -10,8 +10,25 @@ use crate::config::Source;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-// Routes tagged messages into the `log` facade (rendered by the TUI log pane).
-pub fn log(tag: &str, msg: &str) { if tag.contains("err") || tag.contains("fail") { warn!("{} {}", tag, msg); } else { info!("{} {}", tag, msg); } }
+// In-memory log ring buffer that drives the TUI log pane (so it can be cleared).
+pub struct LogLine { pub warn: bool, pub text: String }
+static LOG_BUF: LazyLock<Mutex<VecDeque<LogLine>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+const LOG_CAP: usize = 1000;
+
+// Appends a tagged, timestamped line to the log buffer.
+pub fn log(tag: &str, msg: &str) {
+    let warn = tag.contains("err") || tag.contains("fail");
+    let line = LogLine { warn, text: format!("{} {} {}", chrono::Local::now().format("%H:%M:%S"), tag, msg) };
+    if let Ok(mut b) = LOG_BUF.lock() {
+        if b.len() >= LOG_CAP { b.pop_front(); }
+        b.push_back(line);
+    }
+}
+pub fn clear_logs() { if let Ok(mut b) = LOG_BUF.lock() { b.clear(); } }
+// Snapshot of (is_warn, text) lines, oldest first, for rendering.
+pub fn log_snapshot() -> Vec<(bool, String)> {
+    LOG_BUF.lock().map(|b| b.iter().map(|l| (l.warn, l.text.clone())).collect()).unwrap_or_default()
+}
 
 pub fn now_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
 

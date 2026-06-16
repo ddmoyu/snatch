@@ -7,9 +7,9 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use crate::db::{delete_download, recent_downloads, HistoryRow};
 use crate::state::{AppState, TaskStatus};
-use crate::util::open_dir;
+use crate::util::{clear_logs, log_snapshot, open_dir};
 
-enum Focus { Tasks, History }
+enum Focus { Tasks, Logs, History }
 
 fn load_history(state: &AppState) -> Vec<HistoryRow> {
     let db = state.db.lock().unwrap();
@@ -38,11 +38,12 @@ pub fn run_tui(state: Arc<AppState>) -> std::io::Result<()> {
                 if k.kind != KeyEventKind::Press { continue; }
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                    KeyCode::Tab => { focus = match focus { Focus::Tasks => Focus::History, Focus::History => Focus::Tasks }; }
+                    KeyCode::Tab => { focus = match focus { Focus::Tasks => Focus::Logs, Focus::Logs => Focus::History, Focus::History => Focus::Tasks }; }
                     KeyCode::Char('r') => {
                         let url = match focus {
                             Focus::Tasks => { let ts = state.tasks.lock().unwrap(); ts.get(tsel).map(|t| t.lock().unwrap().url.clone()) }
                             Focus::History => history.get(hsel).map(|h| h.url.clone()),
+                            Focus::Logs => None,
                         };
                         if let Some(u) = url { if !u.is_empty() { let _ = state.retry_tx.send(u); } }
                     }
@@ -59,16 +60,23 @@ pub fn run_tui(state: Arc<AppState>) -> std::io::Result<()> {
                     KeyCode::Up | KeyCode::Char('k') => match focus {
                         Focus::Tasks => { if tsel > 0 { tsel -= 1; } }
                         Focus::History => { if hsel > 0 { hsel -= 1; } }
+                        Focus::Logs => {}
                     },
                     KeyCode::Down | KeyCode::Char('j') => match focus {
                         Focus::Tasks => { if tcount > 0 && tsel + 1 < tcount { tsel += 1; } }
                         Focus::History => { if hsel + 1 < history.len() { hsel += 1; } }
+                        Focus::Logs => {}
                     },
-                    KeyCode::Char('c') => { state.tasks.lock().unwrap().retain(|t| { let s = t.lock().unwrap().status; s != TaskStatus::Done && s != TaskStatus::Failed }); }
+                    KeyCode::Char('c') => match focus {
+                        Focus::Tasks => { state.tasks.lock().unwrap().retain(|t| { let s = t.lock().unwrap().status; s != TaskStatus::Done && s != TaskStatus::Failed }); }
+                        Focus::Logs => clear_logs(),
+                        Focus::History => {}
+                    },
                     KeyCode::Enter => {
                         let dir = match focus {
                             Focus::Tasks => { let ts = state.tasks.lock().unwrap(); ts.get(tsel).and_then(|t| { let g = t.lock().unwrap(); if g.download_dir.is_empty() { None } else { Some(g.download_dir.clone()) } }) }
                             Focus::History => history.get(hsel).map(|h| h.dir.clone()).filter(|d| !d.is_empty()),
+                            Focus::Logs => None,
                         };
                         if let Some(d) = dir { open_dir(Path::new(&d)); }
                     }
@@ -102,6 +110,7 @@ fn ui(f: &mut ratatui::Frame, state: &AppState, focus: &Focus, tsel: usize, hsel
     let left = Layout::vertical([Constraint::Min(4), Constraint::Length(10)]).split(cols[0]);
     let (tasks_area, logs_area, hist_area) = (left[0], left[1], cols[1]);
     let tasks_border = if matches!(focus, Focus::Tasks) { Style::default().fg(ACCENT) } else { border };
+    let logs_border = if matches!(focus, Focus::Logs) { Style::default().fg(ACCENT) } else { border };
     let hist_border = if matches!(focus, Focus::History) { Style::default().fg(ACCENT) } else { border };
 
     let snaps: Vec<Snap> = state.tasks.lock().unwrap().iter().map(|t| {
@@ -185,18 +194,7 @@ fn ui(f: &mut ratatui::Frame, state: &AppState, focus: &Focus, tsel: usize, hsel
     }
 
     // --- Log pane ---
-    let logw = tui_logger::TuiLoggerWidget::default()
-        .block(Block::bordered().border_type(BorderType::Rounded).border_style(border).title(Line::from(Span::styled(" Logs ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))))
-        .output_separator(' ')
-        .output_timestamp(Some("%H:%M:%S".to_string()))
-        .output_level(Some(tui_logger::TuiLoggerLevelOutput::Abbreviated))
-        .output_target(false)
-        .output_file(false)
-        .output_line(false)
-        .style_error(Style::default().fg(Color::Red))
-        .style_warn(Style::default().fg(Color::Yellow))
-        .style_info(Style::default().fg(Color::Green));
-    f.render_widget(logw, logs_area);
+    render_logs(f, logs_area, logs_border);
 
     // --- Right column: History (full height) ---
     render_history(f, hist_area, history, hsel, hist_border);
@@ -214,6 +212,24 @@ fn ui(f: &mut ratatui::Frame, state: &AppState, focus: &Focus, tsel: usize, hsel
         Span::styled("c", key), Span::styled(" clear", lbl),
     ]);
     f.render_widget(Paragraph::new(footer), footer_area);
+}
+
+// Log pane: tail of the in-memory log buffer (newest at the bottom). `c` clears it when focused.
+fn render_logs(f: &mut ratatui::Frame, area: ratatui::layout::Rect, border: ratatui::style::Style) {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, BorderType, Paragraph};
+    const ACCENT: Color = Color::Rgb(46, 204, 113);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(border).title(Line::from(Span::styled(" Logs ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let lines = log_snapshot();
+    let start = lines.len().saturating_sub(inner.height as usize);
+    let rows: Vec<Line> = lines[start..].iter().map(|(warn, t)| {
+        let c = if *warn { Color::Rgb(232, 178, 78) } else { Color::Rgb(120, 180, 130) };
+        Line::from(Span::styled(t.clone(), Style::default().fg(c)))
+    }).collect();
+    f.render_widget(Paragraph::new(rows), inner);
 }
 
 // History panel: recent downloads from SQLite; Enter opens the selected row's folder.

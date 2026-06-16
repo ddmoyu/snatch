@@ -177,7 +177,7 @@ pub fn load_sources(app_dir: &Path) -> Vec<Source> {
         match toml::from_str::<Source>(&content) {
             Ok(s) if s.enabled => sources.push(s),
             Ok(_) => {}
-            Err(e) => log::warn!("[source] parse {}: {}", path.display(), e),
+            Err(e) => crate::util::log("[source-err]", &format!("parse {}: {}", path.display(), e)),
         }
     }
     sources

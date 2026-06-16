@@ -31,8 +31,6 @@ const MAX_TASKS: usize = 3;
 
 fn main() {
     let app_dir = get_app_dir(); ensure_configs(&app_dir); let settings = load_settings(&app_dir); let sources = load_sources(&app_dir); let db = init_db(&app_dir);
-    tui_logger::init_logger(log::LevelFilter::Info).ok();
-    tui_logger::set_default_level(log::LevelFilter::Info);
     log("start", &format!("Snatch v0.3.0 — {} sources", sources.len()));
     log("config", &app_dir.display().to_string());
     let client = Client::builder().emulation(Emulation::Chrome136).redirect(wreq::redirect::Policy::limited(10)).cookie_store(true).build().expect("client");
