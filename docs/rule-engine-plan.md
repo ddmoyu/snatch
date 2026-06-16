@@ -159,7 +159,7 @@ trait Locator { fn select(&self, root, expr) -> Vec<Node>; }  // css/xpath/json 
 
 1. **M1(P0)**:取值字段 + 正则净化 + 取值管线收敛。✅ 已完成
 2. **M2(P1)**:图片选择器 `combine = merge|first`(回退链)。✅ 已完成
-3. **M3(P2)**:JSON 源 + JSONPath(打通 API 类站点)。
+3. **M3(P2)**:JSON 源 + JSONPath(打通 API 类站点)。✅ 已完成
 4. **M4(P3)**:XPath(skyscraper)。
 5. **M5(P4)**:QuickJS 后处理。
 

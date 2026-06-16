@@ -188,6 +188,9 @@ fn preprocess_text_html(html: &str) -> String {
 // ---- data ----
 async fn extract_data(url: &str, source: &Source, client: &Client, task: &Task) -> Result<(String, Extracted), BoxError> {
     let data: &DataRules = source.data.as_ref().ok_or("data source missing [data]")?;
+    if source.format.as_deref() == Some("json") {
+        return extract_data_json(url, source, data, client, task).await;
+    }
     let delay = source.delay_ms.unwrap_or(300);
     let pages = collect_page_urls(url, source.pagination.as_ref(), client).await;
     let headers: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
@@ -218,6 +221,45 @@ fn extract_column(row: ElementRef, col: &Column, base_url: &str) -> String {
     }
     .unwrap_or_default();
     purify(raw, col.regex.as_deref(), col.replace.as_deref().unwrap_or(""))
+}
+
+// JSON data source: parse the response as JSON and pull rows/columns via JSONPath.
+async fn extract_data_json(url: &str, source: &Source, data: &DataRules, client: &Client, task: &Task) -> Result<(String, Extracted), BoxError> {
+    use serde_json_path::JsonPath;
+    let delay = source.delay_ms.unwrap_or(300);
+    let pages = collect_page_urls(url, source.pagination.as_ref(), client).await;
+    let row_path = JsonPath::parse(&data.row).map_err(|e| format!("bad row JSONPath '{}': {}", data.row, e))?;
+    let col_paths: Vec<_> = data.columns.iter().map(|c| (c, JsonPath::parse(&c.get))).collect();
+    let headers: Vec<String> = data.columns.iter().map(|c| c.name.clone()).collect();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (i, page) in pages.iter().enumerate() {
+        if i > 0 { sleep(delay).await; }
+        let body = match fetch(client, page).await { Some(b) => b, None => continue };
+        let v: serde_json::Value = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { log("[json-err]", &e.to_string()); continue; } };
+        for rv in row_path.query(&v).all() {
+            let cells = col_paths.iter().map(|(c, p)| {
+                let raw = match p { Ok(p) => { let nl = p.query(rv); nl.first().map(json_scalar).unwrap_or_default() } Err(_) => String::new() };
+                purify(raw, c.regex.as_deref(), c.replace.as_deref().unwrap_or(""))
+            }).collect::<Vec<_>>();
+            rows.push(cells);
+        }
+        log("[page]", &format!("{}: {} bytes, {} rows", i + 1, body.len(), rows.len()));
+        task.lock().unwrap().total = rows.len();
+    }
+    if rows.is_empty() { return Err("nothing extracted".into()); }
+    Ok((sanitize_filename(&source.name), Extracted::Data { headers, rows }))
+}
+
+// Renders a JSON scalar as a CSV cell; arrays/objects fall back to their JSON text.
+fn json_scalar(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        _ => v.to_string(),
+    }
 }
 
 // ---- image ----
@@ -424,5 +466,17 @@ mod tests {
         let fields = vec![field("img", "@data-src"), field("img", "@src")];
         // data-src yields nothing, so it falls back to src
         assert_eq!(extract_fields_combined(&doc, &fields, None, "https://e.com/", &[], Some("first")), vec!["https://e.com/a.jpg"]);
+    }
+
+    #[test]
+    fn json_path_rows_and_columns() {
+        use serde_json_path::JsonPath;
+        let v: serde_json::Value = serde_json::from_str(r#"[{"t":"A","n":5},{"t":"B","n":7}]"#).unwrap();
+        let rows = JsonPath::parse("$[*]").unwrap().query(&v).all();
+        let col = |rv: &serde_json::Value, p: &str| { let path = JsonPath::parse(p).unwrap(); let nl = path.query(rv); nl.first().map(json_scalar).unwrap_or_default() };
+        let titles: Vec<String> = rows.iter().map(|r| col(*r, "$.t")).collect();
+        let nums: Vec<String> = rows.iter().map(|r| col(*r, "$.n")).collect();
+        assert_eq!(titles, vec!["A", "B"]);
+        assert_eq!(nums, vec!["5", "7"]); // numbers render as strings
     }
 }

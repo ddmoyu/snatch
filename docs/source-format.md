@@ -93,6 +93,38 @@ name,url
 "a3d.dll","https://cn.dll-files.com/a3d.dll.html"
 ```
 
+### JSON 数据源(`format = "json"`)
+
+抓"前端渲染"站点背后的 JSON 接口(复制 API 的 URL,不是页面 URL):
+`row` 是定位数组的 JSONPath,每列 `get` 是相对该行的 JSONPath。
+
+```toml
+type    = "data"
+format  = "json"             # 把响应当 JSON 解析
+domains = ["combot.org"]
+match   = "/api/chart/"
+
+[data]
+row = "$[*]"                 # JSONPath:行数组
+[[data.columns]]
+name = "title"
+get  = "$.t"                 # JSONPath:相对行取字段
+[[data.columns]]
+name = "username"
+get  = "$.u"
+[[data.columns]]
+name = "members"
+get  = "$.s"
+
+[pagination]                 # API 通常是 offset/limit,用 query 翻页
+type  = "query"
+param = "offset"
+start = 0
+end   = 100
+```
+
+数字/布尔会转成字符串;`regex`/`replace` 仍可用。
+
 ---
 
 ## type = "text" —— 文档(小说/新闻/论坛)

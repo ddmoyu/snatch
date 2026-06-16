@@ -91,6 +91,8 @@ fn default_get() -> String { "text".to_string() }
     pub domains: Vec<String>,
     #[serde(rename = "match", default)] pub match_: Option<String>,
     #[serde(default = "default_true")] pub enabled: bool,
+    #[serde(default)] pub format: Option<String>, // html (default) | json
+
     #[serde(default)] pub output: Option<String>,
     #[serde(default)] pub delay_ms: Option<u64>,
     #[serde(default)] pub pagination: Option<Pagination>,
