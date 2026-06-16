@@ -40,7 +40,12 @@ pub async fn crawl(url: &str, source: &Source, settings: &crate::config::Setting
 // ---- Shared fetch / pagination ----
 
 async fn fetch(client: &Client, url: &str) -> Option<String> {
-    let resp = client.get(url).header("Accept-Language", "zh-CN,zh;q=0.9").send().await.ok()?;
+    // A same-origin Referer gets past common anti-hotlink / Cloudflare checks that 403 "direct" hits.
+    let mut req = client.get(url).header("Accept-Language", "zh-CN,zh;q=0.9");
+    if let Some(origin) = url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h))) {
+        req = req.header("Referer", origin);
+    }
+    let resp = req.send().await.ok()?;
     if !resp.status().is_success() { log("[page-err]", &format!("HTTP {}: {}", resp.status(), url)); return None; }
     resp.text().await.ok()
 }
