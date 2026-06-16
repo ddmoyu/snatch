@@ -28,13 +28,20 @@ static RE_PATH_PAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/\d+/$").un
 
 pub async fn crawl(url: &str, source: &Source, settings: &crate::config::Settings, client: &Client, task: &Task) -> Result<CrawlResult, BoxError> {
     log("[crawl]", &format!("{} ({})", url, source.kind));
-    let (title, extracted) = match source.kind.as_str() {
-        "data" => extract_data(url, source, client, task).await?,
-        "text" => extract_text(url, source, client, task).await?,
-        "image" => extract_image(url, source, client, task).await?,
-        other => return Err(format!("unknown source type '{}'", other).into()),
-    };
+    let (title, extracted) = extract(url, source, client, task).await?;
     crate::download::persist(title, extracted, source, settings, client, url, task).await
+}
+
+// Runs only the fetch + extraction stages (no download / no persist / no DB). Powers the
+// headless `snatch test` command so rule authors validate selectors through the *real*
+// wreq client (same TLS emulation a normal crawl uses), not some other HTTP tool.
+pub async fn extract(url: &str, source: &Source, client: &Client, task: &Task) -> Result<(String, Extracted), BoxError> {
+    match source.kind.as_str() {
+        "data" => extract_data(url, source, client, task).await,
+        "text" => extract_text(url, source, client, task).await,
+        "image" => extract_image(url, source, client, task).await,
+        other => Err(format!("unknown source type '{}'", other).into()),
+    }
 }
 
 // ---- Shared fetch / pagination ----
@@ -52,6 +59,20 @@ async fn fetch(client: &Client, url: &str, headers: &[(String, String)]) -> Opti
     let resp = req.send().await.ok()?;
     if !resp.status().is_success() { log("[page-err]", &format!("HTTP {}: {}", resp.status(), url)); return None; }
     resp.text().await.ok()
+}
+
+// Fetches a page's raw HTML through the same client/Referer logic a real crawl uses. Powers the
+// headless `snatch fetch` command, so a rule author sees the EXACT HTML the program would parse
+// (same TLS fingerprint), then writes selectors against it.
+pub async fn fetch_html(client: &Client, url: &str, headers: &[(String, String)]) -> Option<String> {
+    fetch(client, url, headers).await
+}
+
+// Removes <script> and <style> blocks (tags + bodies) to make fetched HTML readable for picking
+// selectors; structural tags/classes/ids are preserved.
+pub fn strip_noise(html: &str) -> String {
+    let h = RE_STYLE.replace_all(html, "");
+    RE_SCRIPT.replace_all(&h, "").into_owned()
 }
 
 async fn sleep(ms: u64) { tokio::time::sleep(Duration::from_millis(ms)).await; }
