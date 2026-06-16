@@ -21,6 +21,7 @@ fn default_get() -> String { "text".to_string() }
     #[serde(default)] pub regex: Option<String>,
     #[serde(default)] pub replace: Option<String>,
     #[serde(default)] pub engine: Option<String>, // css (default) | xpath
+    #[serde(default)] pub js: Option<String>,     // JS post-process; `result`/`baseUrl` in scope
 }
 
 #[derive(Deserialize, Clone)] pub struct Column {
@@ -29,6 +30,7 @@ fn default_get() -> String { "text".to_string() }
     #[serde(default = "default_get")] pub get: String,
     #[serde(default)] pub regex: Option<String>,
     #[serde(default)] pub replace: Option<String>,
+    #[serde(default)] pub js: Option<String>,
 }
 
 #[derive(Deserialize, Clone)] pub struct Pagination {
@@ -69,6 +71,7 @@ fn default_get() -> String { "text".to_string() }
     #[serde(default)] pub chapters: Option<Chapters>,
     #[serde(default)] pub convert: Option<String>,
     #[serde(default)] pub strip: Vec<String>,
+    #[serde(default)] pub js: Option<String>, // JS post-process on each content body
 }
 
 #[derive(Deserialize, Clone)] pub struct ImageDetail {

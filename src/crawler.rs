@@ -125,6 +125,32 @@ fn purify(value: String, regex: Option<&str>, replace: &str) -> String {
     }
 }
 
+thread_local! {
+    static JS_CTX: std::cell::RefCell<boa_engine::Context> = std::cell::RefCell::new(boa_engine::Context::default());
+}
+
+// Runs a `js` post-process script with `result` (current value) and `baseUrl` in scope; the
+// script's resulting value becomes the new value. On a script error the input is returned
+// unchanged. Reuses a per-thread Boa context (pure-Rust engine, no C toolchain).
+fn run_js(script: &str, value: String, base_url: &str) -> String {
+    use boa_engine::{js_string, property::Attribute, JsString, Source};
+    JS_CTX.with(|c| {
+        let mut ctx = c.borrow_mut();
+        let _ = ctx.register_global_property(js_string!("result"), JsString::from(value.as_str()), Attribute::all());
+        let _ = ctx.register_global_property(js_string!("baseUrl"), JsString::from(base_url), Attribute::all());
+        match ctx.eval(Source::from_bytes(script)) {
+            Ok(v) => v.to_string(&mut ctx).map(|s| s.to_std_string_escaped()).unwrap_or(value),
+            Err(_) => value,
+        }
+    })
+}
+
+// Applies the regex purify, then (if set) the JS post-process, to one extracted value.
+fn finish_value(value: String, regex: Option<&str>, replace: &str, js: Option<&str>, base_url: &str) -> String {
+    let value = purify(value, regex, replace);
+    match js { Some(s) => run_js(s, value, base_url), None => value }
+}
+
 fn scoped(container: Option<&String>, expr: &str) -> String {
     match container { Some(c) => format!("{} {}", c, expr), None => expr.to_string() }
 }
@@ -172,7 +198,7 @@ fn extract_fields(doc: &Html, html: &str, fields: &[Field], container: Option<&S
     for f in fields {
         if f.engine.as_deref() == Some("xpath") {
             for v in xpath_values(html, &f.selector, &f.get, base_url) {
-                let v = purify(v, f.regex.as_deref(), f.replace.as_deref().unwrap_or(""));
+                let v = finish_value(v, f.regex.as_deref(), f.replace.as_deref().unwrap_or(""), f.js.as_deref(), base_url);
                 if !v.is_empty() { out.push(v); }
             }
             continue;
@@ -181,7 +207,7 @@ fn extract_fields(doc: &Html, html: &str, fields: &[Field], container: Option<&S
         for el in doc.select(&sel) {
             if excluded.contains(&el.id()) { continue; }
             if let Some(v) = extract_get(el, &f.get, base_url) {
-                let v = purify(v, f.regex.as_deref(), f.replace.as_deref().unwrap_or(""));
+                let v = finish_value(v, f.regex.as_deref(), f.replace.as_deref().unwrap_or(""), f.js.as_deref(), base_url);
                 if !v.is_empty() { out.push(v); }
             }
         }
@@ -272,7 +298,7 @@ fn extract_column(row: ElementRef, col: &Column, base_url: &str) -> String {
         None => extract_get(row, &col.get, base_url),
     }
     .unwrap_or_default();
-    purify(raw, col.regex.as_deref(), col.replace.as_deref().unwrap_or(""))
+    finish_value(raw, col.regex.as_deref(), col.replace.as_deref().unwrap_or(""), col.js.as_deref(), base_url)
 }
 
 // JSON data source: parse the response as JSON and pull rows/columns via JSONPath.
@@ -386,15 +412,21 @@ async fn extract_text(url: &str, source: &Source, client: &Client, task: &Task) 
             if let Ok(each) = Selector::parse(&sec.each) {
                 for el in doc.select(&each) {
                     let body = el_get(el, &sec.content, get, page).unwrap_or_default();
-                    if body.trim().is_empty() { continue; }
+                    let body = body.trim().to_string();
+                    let body = match t.js.as_deref() { Some(s) => run_js(s, body, page), None => body };
+                    if body.is_empty() { continue; }
                     let st = sec.title.as_deref().and_then(|s| el_text(el, s));
                     let sd = sec.date.as_deref().and_then(|s| el_text(el, s));
-                    parts.push(format_section(st, sd, body.trim()));
+                    parts.push(format_section(st, sd, &body));
                 }
             }
         } else if let Some(content) = &t.content {
             let get = t.get.as_deref().unwrap_or("text");
-            if let Some(body) = doc_get(&doc, content, get, page) { if !body.trim().is_empty() { parts.push(body.trim().to_string()); } }
+            if let Some(body) = doc_get(&doc, content, get, page) {
+                let body = body.trim().to_string();
+                let body = match t.js.as_deref() { Some(s) => run_js(s, body, page), None => body };
+                if !body.is_empty() { parts.push(body); }
+            }
         }
         task.lock().unwrap().total = parts.len().max(1);
     }
@@ -424,9 +456,11 @@ async fn extract_chapters(url: &str, t: &TextRules, ch: &Chapters, client: &Clie
         let chtml = preprocess_text_html(&chtml);
         let doc = Html::parse_document(&chtml);
         let body = doc_get(&doc, &ch.content, get, link).unwrap_or_default();
-        if body.trim().is_empty() { continue; }
+        let body = body.trim().to_string();
+        let body = match t.js.as_deref() { Some(s) => run_js(s, body, link), None => body };
+        if body.is_empty() { continue; }
         let ctitle = doc_text(&doc, ch.title.as_deref());
-        parts.push(match ctitle { Some(c) => format!("{}\n\n{}", c, body.trim()), None => body.trim().to_string() });
+        parts.push(match ctitle { Some(c) => format!("{}\n\n{}", c, body), None => body });
         task.lock().unwrap().done = i + 1;
         log("[chapter]", &format!("{}/{}", i + 1, links.len()));
     }
@@ -466,7 +500,7 @@ mod tests {
     use crate::config::Field;
 
     fn field(selector: &str, get: &str) -> Field {
-        Field { selector: selector.into(), get: get.into(), regex: None, replace: None, engine: None }
+        Field { selector: selector.into(), get: get.into(), regex: None, replace: None, engine: None, js: None }
     }
 
     #[test]
@@ -516,8 +550,8 @@ mod tests {
     fn data_column_relative_to_row() {
         let doc = Html::parse_document(r#"<ul><li class="r"><a href="/p1">One</a></li><li class="r"><a href="/p2">Two</a></li></ul>"#);
         let sel = Selector::parse("li.r").unwrap();
-        let name_col = Column { name: "name".into(), selector: Some("a".into()), get: "text".into(), regex: None, replace: None };
-        let url_col = Column { name: "url".into(), selector: Some("a".into()), get: "@href".into(), regex: None, replace: None };
+        let name_col = Column { name: "name".into(), selector: Some("a".into()), get: "text".into(), regex: None, replace: None, js: None };
+        let url_col = Column { name: "url".into(), selector: Some("a".into()), get: "@href".into(), regex: None, replace: None, js: None };
         let rows: Vec<Vec<String>> = doc.select(&sel).map(|r| vec![extract_column(r, &name_col, "https://e.com/"), extract_column(r, &url_col, "https://e.com/")]).collect();
         assert_eq!(rows, vec![vec!["One".to_string(), "https://e.com/p1".into()], vec!["Two".into(), "https://e.com/p2".into()]]);
     }
@@ -552,5 +586,23 @@ mod tests {
         let nums: Vec<String> = rows.iter().map(|r| col(*r, "$.n")).collect();
         assert_eq!(titles, vec!["A", "B"]);
         assert_eq!(nums, vec!["5", "7"]); // numbers render as strings
+    }
+
+    #[test]
+    fn js_post_process_transforms_value() {
+        let html = r#"<span class="p">Price: $1,299.00 USD</span>"#;
+        let doc = Html::parse_document(html);
+        let mut f = field(".p", "text");
+        f.js = Some("result.replace(/[^0-9.]/g, '')".into());
+        assert_eq!(extract_fields(&doc, html, &[f], None, "https://e.com/", &[]), vec!["1299.00"]);
+    }
+
+    #[test]
+    fn js_error_keeps_original_value() {
+        let html = r#"<a>X</a>"#;
+        let doc = Html::parse_document(html);
+        let mut f = field("a", "text");
+        f.js = Some("@@@ not valid js @@@".into());
+        assert_eq!(extract_fields(&doc, html, &[f], None, "https://e.com/", &[]), vec!["X"]); // unchanged on error
     }
 }

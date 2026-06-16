@@ -44,6 +44,7 @@ delay_ms = 300                  # 可选:多次请求(分页/跟进)之间的间
   - 默认 `text`。
 - `regex` / `replace` —— 可选正则净化(对取到的值做替换,`replace` 默认空=删除)。
 - `engine` —— 可选 `css`(默认)/ `xpath`(image 选择器支持)。xpath 表达式自带定位,不吃 `container`/`exclude`;`get` 仍用 `@src` / `text` 等,或直接写属性 xpath `//img/@src`。
+- `js` —— 可选 JS 后处理(Boa 纯 Rust 引擎)。脚本里 `result`=当前值、`baseUrl`=页面源;脚本的结果值即新值,出错则保留原值。管线顺序:**定位 → 取值 → 正则 → JS**。例:`js = "result.replace(/[^0-9.]/g,'')"`。
 
 ## 分页(可选,所有类型共用)
 
